@@ -4,4 +4,4 @@ numpy
 scipy
 requests
 rich
-nba_api
+lxml
