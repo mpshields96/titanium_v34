@@ -5,7 +5,7 @@ import json
 import os
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="TITANIUM V34.3 COMMAND", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="TITANIUM V34.4 COMMAND", layout="wide", page_icon="⚡")
 
 # --- CSS STYLING ---
 st.markdown("""
@@ -32,7 +32,7 @@ def load_v34_protocol():
             return None
     except: return None
 
-# --- NBA STATS ENGINE (NBA ONLY) ---
+# --- NBA STATS ENGINE (FULL 30 TEAMS RESTORED) ---
 @st.cache_data(ttl=3600)
 def fetch_nba_stats():
     """Retrieves NetRtg and Pace for NBA Titanium Score Calculation."""
@@ -53,14 +53,38 @@ def fetch_nba_stats():
         if len(db) > 20: return db
     except: pass
     
-    # STATIC BACKUP
+    # STATIC BACKUP (FULL 30 TEAMS - NO TRUNCATION)
     return {
         "Boston Celtics": {"NetRtg": 9.5, "Pace": 98.5},
         "Oklahoma City Thunder": {"NetRtg": 8.2, "Pace": 101.0},
         "Denver Nuggets": {"NetRtg": 5.5, "Pace": 97.5},
+        "Minnesota Timberwolves": {"NetRtg": 6.1, "Pace": 98.0},
         "New York Knicks": {"NetRtg": 4.8, "Pace": 96.5},
         "Milwaukee Bucks": {"NetRtg": -1.5, "Pace": 102.0},
-        "L.A. Lakers": {"NetRtg": 1.2, "Pace": 100.5}
+        "Philadelphia 76ers": {"NetRtg": 3.2, "Pace": 99.0},
+        "Cleveland Cavaliers": {"NetRtg": 4.5, "Pace": 98.2},
+        "Dallas Mavericks": {"NetRtg": -2.1, "Pace": 101.5},
+        "L.A. Clippers": {"NetRtg": 2.5, "Pace": 97.8},
+        "L.A. Lakers": {"NetRtg": 1.2, "Pace": 100.5},
+        "Phoenix Suns": {"NetRtg": 3.8, "Pace": 99.5},
+        "Sacramento Kings": {"NetRtg": 1.5, "Pace": 100.2},
+        "New Orleans Pelicans": {"NetRtg": 0.5, "Pace": 99.0},
+        "Golden State Warriors": {"NetRtg": 1.8, "Pace": 100.0},
+        "Houston Rockets": {"NetRtg": 2.2, "Pace": 99.8},
+        "Miami Heat": {"NetRtg": 0.8, "Pace": 97.0},
+        "Indiana Pacers": {"NetRtg": 1.5, "Pace": 103.5},
+        "Orlando Magic": {"NetRtg": 2.1, "Pace": 98.5},
+        "Atlanta Hawks": {"NetRtg": -1.5, "Pace": 102.5},
+        "Brooklyn Nets": {"NetRtg": -4.5, "Pace": 98.5},
+        "Toronto Raptors": {"NetRtg": -5.2, "Pace": 100.0},
+        "Chicago Bulls": {"NetRtg": -3.8, "Pace": 99.2},
+        "Charlotte Hornets": {"NetRtg": -6.5, "Pace": 100.5},
+        "Detroit Pistons": {"NetRtg": -7.2, "Pace": 101.0},
+        "Washington Wizards": {"NetRtg": -8.5, "Pace": 103.0},
+        "Utah Jazz": {"NetRtg": -5.5, "Pace": 99.5},
+        "Portland Trail Blazers": {"NetRtg": -6.8, "Pace": 98.8},
+        "San Antonio Spurs": {"NetRtg": -1.2, "Pace": 101.5},
+        "Memphis Grizzlies": {"NetRtg": 3.5, "Pace": 100.0}
     }
 
 # --- MULTI-SPORT API ---
@@ -131,12 +155,17 @@ class TitaniumGatekeeper:
             # TITANIUM SCORE
             h_st, a_st = get_nba_team_stats(h_name, self.stats_db), get_nba_team_stats(a_name, self.stats_db)
             t_edge = None
+            t_edge_val = 0.0
             if h_st and a_st:
                 h_sc = (h_st['NetRtg'] * (h_st['Pace']/100)) + 1.5
                 a_sc = (a_st['NetRtg'] * (a_st['Pace']/100))
                 delta = h_sc - a_sc
-                if delta > 3.0: t_edge = "HOME"
-                elif delta < -3.0: t_edge = "AWAY"
+                if delta > 3.0: 
+                    t_edge = "HOME"
+                    t_edge_val = abs(delta)
+                elif delta < -3.0: 
+                    t_edge = "AWAY"
+                    t_edge_val = abs(delta)
 
             if not comp.get('odds'): return []
             odds_obj = comp['odds'][0]
@@ -148,14 +177,24 @@ class TitaniumGatekeeper:
                 parts = spread_str.split(" ")
                 fav_abbr, spread_val = parts[0], float(parts[1])
                 target_team = h_name if home['team']['abbreviation'] == fav_abbr else a_name
+                
+                # Resolve final line relative to target
+                # If we want Home, and Home is Fav (spread -5.5), Line is -5.5
+                # If we want Home, and Home is Dog (spread +5.5), Line is +5.5
+                is_home_fav = (home['team']['abbreviation'] == fav_abbr)
                 target_side = "HOME" if target_team == h_name else "AWAY"
+                
+                final_line = spread_val
+                if not ((target_side == "HOME" and is_home_fav) or (target_side == "AWAY" and not is_home_fav)):
+                    final_line = spread_val * -1
 
-                if t_edge and t_edge == target_side and abs(spread_val) <= 10.5:
+                if t_edge and t_edge == target_side and abs(final_line) <= 10.5:
+                    price = str(odds_obj.get('price', -110))
                     approved.append({
                         "Sport": "NBA", "Matchup": short_name, "Bet_Type": "Spread",
-                        "Team_Target": target_team, "Line": str(spread_val),
-                        "Price": str(odds_obj.get('price', -110)), "Sportsbook": provider,
-                        "Logic": "V34 Edge | Blowout Check Passed"
+                        "Team_Target": target_team, "Line": str(final_line),
+                        "Price": price, "Sportsbook": provider,
+                        "Logic": f"Titanium Edge {t_edge_val:.1f} | Blowout Check Passed"
                     })
             except: pass
             
@@ -164,9 +203,9 @@ class TitaniumGatekeeper:
                 h_ml = float(odds_obj.get('homeTeamOdds', {}).get('moneyLine', -9999))
                 a_ml = float(odds_obj.get('awayTeamOdds', {}).get('moneyLine', -9999))
                 if t_edge == "HOME" and h_ml > -200:
-                    approved.append({"Sport": "NBA", "Matchup": short_name, "Bet_Type": "Moneyline", "Team_Target": h_name, "Line": "ML", "Price": str(h_ml), "Sportsbook": provider, "Logic": "V34 Edge | ML Value"})
+                    approved.append({"Sport": "NBA", "Matchup": short_name, "Bet_Type": "Moneyline", "Team_Target": h_name, "Line": "ML", "Price": str(h_ml), "Sportsbook": provider, "Logic": f"Titanium Edge {t_edge_val:.1f} | ML Value"})
                 if t_edge == "AWAY" and a_ml > -200:
-                    approved.append({"Sport": "NBA", "Matchup": short_name, "Bet_Type": "Moneyline", "Team_Target": a_name, "Line": "ML", "Price": str(a_ml), "Sportsbook": provider, "Logic": "V34 Edge | ML Value"})
+                    approved.append({"Sport": "NBA", "Matchup": short_name, "Bet_Type": "Moneyline", "Team_Target": a_name, "Line": "ML", "Price": str(a_ml), "Sportsbook": provider, "Logic": f"Titanium Edge {t_edge_val:.1f} | ML Value"})
             except: pass
 
         except: pass
@@ -261,14 +300,14 @@ def scan_player_props(game_id):
 
 # --- MAIN UI ---
 def main():
-    st.sidebar.title("TITANIUM V34.3 COMMAND")
+    st.sidebar.title("TITANIUM V34.4 COMMAND")
     sport = st.sidebar.selectbox("PROTOCOL SELECTION", ["NBA", "NHL", "NCAAB", "NFL (Offseason)"])
     
     config = load_v34_protocol()
     if config: st.sidebar.success("BRAIN: ONLINE")
     else: st.sidebar.error("BRAIN: OFFLINE")
     
-    st.title(f"⚡ TITANIUM V34.3 | {sport}")
+    st.title(f"⚡ TITANIUM V34.4 | {sport}")
     
     if sport in ["NBA", "NHL", "NCAAB"]:
         if st.button("EXECUTE TITANIUM SEQUENCE"):
