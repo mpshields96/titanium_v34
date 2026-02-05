@@ -5,8 +5,12 @@ import json
 import os
 import time
 
+# --- TITANIUM KEYVAULT ---
+# USER PROVIDED KEY
+ODDS_API_KEY = "01dc7be6ca076e6b79ac4f54001d142d"
+
 # --- CONFIGURATION ---
-st.set_page_config(page_title="TITANIUM V34.7 ORIGINATOR", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="TITANIUM V34.8 LIVE PROPS", layout="wide", page_icon="⚡")
 
 # --- CSS STYLING ---
 st.markdown("""
@@ -14,6 +18,8 @@ st.markdown("""
     .stApp {background-color: #0E1117;}
     div.stButton > button {width: 100%; background-color: #00FF00; color: black; font-weight: bold; border: none;}
     .metric-card {background-color: #262730; padding: 15px; border-radius: 8px; border-left: 5px solid #00FF00; margin-bottom: 10px;}
+    .status-pass {color: #00FF00; font-weight: bold;}
+    .status-fail {color: #FF4B4B; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -31,12 +37,97 @@ def load_v34_protocol():
             return None
     except: return None
 
+# --- ODDS API ENGINE (LIVE PROPS) ---
+class OddsAPIEngine:
+    def __init__(self, api_key):
+        self.key = api_key
+        self.base = "https://api.the-odds-api.com/v4/sports"
+    
+    def fetch_nba_events(self):
+        """Get Game IDs."""
+        url = f"{self.base}/basketball_nba/events?apiKey={self.key}&regions=us&markets=h2h"
+        try:
+            return requests.get(url).json()
+        except: return []
+
+    def fetch_player_props(self, event_id):
+        """Get Props for a specific game."""
+        # Markets: player_points (We focus on Points for KOTC)
+        url = f"{self.base}/basketball_nba/events/{event_id}/odds?apiKey={self.key}&regions=us&markets=player_points&oddsFormat=american"
+        try:
+            r = requests.get(url)
+            return r.json()
+        except: return None
+
+    def parse_props(self, data, h_team, a_team, stats_db):
+        """Extracts Props & Applies V34 Logic."""
+        targets = []
+        bookmakers = data.get('bookmakers', [])
+        if not bookmakers: return []
+
+        # Prioritize DraftKings, fallback to first available
+        dk_book = next((b for b in bookmakers if b['key'] == 'draftkings'), bookmakers[0])
+        
+        # Get Defensive Stats
+        h_stats = get_nba_team_stats(h_team, stats_db)
+        a_stats = get_nba_team_stats(a_team, stats_db)
+        
+        # Defaults if stats missing
+        if not h_stats: h_stats = {"DefRtg": 110, "Pace": 98}
+        if not a_stats: a_stats = {"DefRtg": 110, "Pace": 98}
+
+        for market in dk_book.get('markets', []):
+            if market['key'] == 'player_points':
+                for outcome in market['outcomes']:
+                    # outcome: {'description': 'LeBron James', 'name': 'Over', 'price': -115, 'point': 24.5}
+                    player_name = outcome['description']
+                    side = outcome.get('name')
+                    line = outcome.get('point')
+                    price = outcome.get('price')
+                    
+                    if side == "Over":
+                        # LOGIC: We don't know which team the player is on easily.
+                        # V34 HEURISTIC: Check if EITHER defense is a "Green Light".
+                        # If the Game has a DefRtg > 114 involved, we flag the stars.
+                        
+                        trigger = False
+                        logic_msg = ""
+                        
+                        # Check threshold (Only look at stars > 18.5 pts)
+                        if line > 18.5:
+                            # Scenario A: Home Def is Bad (Target Away Player)
+                            if h_stats['DefRtg'] >= 114.0:
+                                trigger = True
+                                logic_msg = f"Target vs {h_team} (DefRtg {h_stats['DefRtg']})"
+                            
+                            # Scenario B: Away Def is Bad (Target Home Player)
+                            elif a_stats['DefRtg'] >= 114.0:
+                                trigger = True
+                                logic_msg = f"Target vs {a_team} (DefRtg {a_stats['DefRtg']})"
+                                
+                            # Scenario C: Pace is Extreme
+                            elif h_stats['Pace'] > 100.0 or a_stats['Pace'] > 100.0:
+                                trigger = True
+                                logic_msg = "High Pace Environment"
+
+                            if trigger:
+                                targets.append({
+                                    "Sport": "NBA",
+                                    "Matchup": f"{h_team} vs {a_team}",
+                                    "Bet_Type": "Player Prop",
+                                    "Team_Target": player_name,
+                                    "Line": f"Over {line}",
+                                    "Price": str(price),
+                                    "Sportsbook": dk_book['title'],
+                                    "Logic": f"KOTC GREEN LIGHT: {logic_msg}"
+                                })
+        return targets
+
 # --- NBA STATS ENGINE (FULL 30 TEAMS) ---
 @st.cache_data(ttl=3600)
 def fetch_nba_stats():
     """Retrieves NetRtg, Pace, DefRtg."""
     db = {}
-    # LEVEL 1: HOLLINGER SCRAPE
     try:
         url = "http://www.espn.com/nba/hollinger/statistics"
         dfs = pd.read_html(url, header=1)
@@ -53,7 +144,7 @@ def fetch_nba_stats():
         if len(db) > 20: return db
     except: pass
     
-    # LEVEL 2: STATIC BACKUP (FULL 30 TEAMS)
+    # STATIC BACKUP
     return {
         "Boston Celtics": {"NetRtg": 9.5, "Pace": 98.5, "DefRtg": 110.5}, "Oklahoma City Thunder": {"NetRtg": 8.2, "Pace": 101.0, "DefRtg": 111.0},
         "Denver Nuggets": {"NetRtg": 5.5, "Pace": 97.5, "DefRtg": 113.5}, "Minnesota Timberwolves": {"NetRtg": 6.1, "Pace": 98.0, "DefRtg": 109.0},
@@ -72,7 +163,7 @@ def fetch_nba_stats():
         "San Antonio Spurs": {"NetRtg": -1.2, "Pace": 101.5, "DefRtg": 115.0}, "Memphis Grizzlies": {"NetRtg": 3.5, "Pace": 100.0, "DefRtg": 112.5}
     }
 
-# --- MULTI-SPORT API ---
+# --- MULTI-SPORT API (ESPN) ---
 def get_live_data(sport):
     urls = {
         "NBA": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
@@ -85,94 +176,6 @@ def get_live_data(sport):
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         return r.json() if r.status_code == 200 else None
     except: return None
-
-# --- TITANIUM ORIGINATOR (PLAYER PROPS ENGINE) ---
-class TitaniumOriginator:
-    def __init__(self):
-        self.headers = {"User-Agent": "Mozilla/5.0"}
-    
-    def fetch_roster(self, team_id):
-        """Fetches active roster to identify Stars."""
-        url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team_id}/roster"
-        try:
-            r = requests.get(url, headers=self.headers, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                # Filter: Top 3 players by estimated value (using 'salary' or default sorting)
-                # ESPN Roster usually sorts by importance. We take top 3 active.
-                athletes = data.get('athletes', [])
-                targets = []
-                for ath in athletes[:3]: # Scan top 3 only to save API time
-                    if ath.get('status', {}).get('type') == 'active':
-                        targets.append({
-                            "id": ath['id'],
-                            "name": ath['fullName'],
-                            "position": ath['position']['abbreviation']
-                        })
-                return targets
-        except: pass
-        return []
-
-    def fetch_gamelog(self, player_id):
-        """Fetches L5 Game Logs."""
-        url = f"https://site.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{player_id}/gamelog"
-        try:
-            r = requests.get(url, headers=self.headers, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                events = data.get('events', [])
-                if not events: return None
-                
-                # Calculate L5 Avg Points
-                points = []
-                for e in events[:5]: # Last 5
-                    try:
-                        stats = e.get('stats', [])
-                        pts = float(stats[13]) # Index 13 is usually PTS in ESPN JSON, checking...
-                        # Actually ESPN Common V3 is tricky. Let's use 'stats' dict if avail.
-                        # Safe fallback: Assume standard array.
-                        points.append(pts)
-                    except: pass
-                
-                if points:
-                    return sum(points) / len(points)
-        except: pass
-        return None
-
-    def analyze_player(self, player, team_stats, opp_stats):
-        """Applies V34 KOTC Logic."""
-        # Get L5 Form
-        l5_avg = self.fetch_gamelog(player['id'])
-        if not l5_avg: return None
-        
-        # Calculate Titanium Projection
-        # Formula: Base (L5) + Defense Modifier
-        # If Opponent DefRtg > 115 -> +5% Boost
-        # If Opponent Pace > 100 -> +3% Boost
-        
-        proj = l5_avg
-        logic = []
-        
-        if opp_stats.get('DefRtg', 110) > 115.0:
-            proj *= 1.05
-            logic.append("Weak Def")
-        
-        if opp_stats.get('Pace', 98) > 100.0:
-            proj *= 1.03
-            logic.append("High Pace")
-            
-        # V34 SECTION XXV: "Identify Highest PRA Ceiling"
-        # We assume 'player' is a 'Creator' based on roster rank.
-        
-        # OUTPUT THRESHOLD: Only target if Projection > 20 pts (volume scorer)
-        if proj > 20.0:
-            return {
-                "Target": player['name'],
-                "L5_Avg": f"{l5_avg:.1f}",
-                "Titanium_Proj": f"{proj:.1f}",
-                "Logic": " | ".join(logic) if logic else "Standard Val"
-            }
-        return None
 
 # --- HELPER: TEAM MAPPING ---
 def get_nba_team_stats(name, db):
@@ -202,7 +205,6 @@ class TitaniumGatekeeper:
         self.config = config
         self.stats_db = stats_db
         self.bans = ["Milwaukee Bucks", "Pittsburgh Penguins"]
-        self.originator = TitaniumOriginator() # NEW MODULE
 
     def _get_provider(self, odds_obj):
         try: return odds_obj.get('provider', {}).get('name', 'Consensus')
@@ -214,7 +216,7 @@ class TitaniumGatekeeper:
         elif sport == "NCAAB": return self.audit_ncaab(event)
         return []
 
-    # --- NBA LOGIC (SPREADS + PROPS) ---
+    # --- NBA LOGIC ---
     def audit_nba(self, event):
         approved = []
         try:
@@ -228,34 +230,6 @@ class TitaniumGatekeeper:
 
             # STATS
             h_st, a_st = get_nba_team_stats(h_name, self.stats_db), get_nba_team_stats(a_name, self.stats_db)
-            
-            # --- TITANIUM ORIGINATOR (PROPS) ---
-            # Only run for games starting soon to avoid API spam? No, run all.
-            # Fetch Home Stars
-            h_stars = self.originator.fetch_roster(home['id'])
-            for p in h_stars:
-                res = self.originator.analyze_player(p, h_st, a_st) # Player, Own Stats, Opp Stats
-                if res:
-                    approved.append({
-                        "Sport": "NBA", "Matchup": short_name, "Bet_Type": "Player Prop",
-                        "Team_Target": res['Target'], "Line": f"Proj {res['Titanium_Proj']}", 
-                        "Price": "AUDIT", "Sportsbook": "Originator", 
-                        "Logic": f"L5: {res['L5_Avg']} | {res['Logic']} | BUY < {float(res['Titanium_Proj'])-1.0:.1f}"
-                    })
-
-            # Fetch Away Stars
-            a_stars = self.originator.fetch_roster(away['id'])
-            for p in a_stars:
-                res = self.originator.analyze_player(p, a_st, h_st)
-                if res:
-                    approved.append({
-                        "Sport": "NBA", "Matchup": short_name, "Bet_Type": "Player Prop",
-                        "Team_Target": res['Target'], "Line": f"Proj {res['Titanium_Proj']}", 
-                        "Price": "AUDIT", "Sportsbook": "Originator", 
-                        "Logic": f"L5: {res['L5_Avg']} | {res['Logic']} | BUY < {float(res['Titanium_Proj'])-1.0:.1f}"
-                    })
-
-            # --- SPREAD/ML LOGIC (EXISTING) ---
             t_edge = None
             t_edge_val = 0.0
             if h_st and a_st:
@@ -369,25 +343,67 @@ class TitaniumGatekeeper:
 
 # --- MAIN UI ---
 def main():
-    st.sidebar.title("TITANIUM V34.7 ORIGINATOR")
+    st.sidebar.title("TITANIUM V34.8 LIVE PROPS")
     sport = st.sidebar.selectbox("PROTOCOL SELECTION", ["NBA", "NHL", "NCAAB", "NFL (Offseason)"])
     
     config = load_v34_protocol()
     if config: st.sidebar.success("BRAIN: ONLINE")
     else: st.sidebar.error("BRAIN: OFFLINE")
     
-    st.title(f"⚡ TITANIUM V34.7 | {sport}")
+    st.title(f"⚡ TITANIUM V34.8 | {sport}")
     
-    if sport in ["NBA", "NHL", "NCAAB"]:
+    # --- NBA EXECUTION ---
+    if sport == "NBA":
         if st.button("EXECUTE TITANIUM SEQUENCE"):
-            with st.spinner(f"AUDITING {sport} MARKETS (Running Originator... This takes 10s)..."):
-                raw_data = get_live_data(sport)
+            with st.spinner("AUDITING MARKETS (Connecting to Odds API & ESPN)..."):
                 
-                if raw_data:
-                    stats_db = fetch_nba_stats() if sport == "NBA" else None
-                    gatekeeper = TitaniumGatekeeper(config, stats_db)
-                    ledger = []
+                # 1. FETCH LIVE PROPS
+                odds_engine = OddsAPIEngine(ODDS_API_KEY)
+                stats_db = fetch_nba_stats()
+                
+                # Fetch Events first
+                events = odds_engine.fetch_nba_events() # Cost: 1
+                prop_ledger = []
+                
+                if events:
+                    for event in events:
+                        # Fetch Props for this game
+                        game_props = odds_engine.fetch_player_props(event['id']) # Cost: 1 per game
+                        if game_props:
+                            # Parse
+                            p_targets = odds_engine.parse_props(game_props, event['home_team'], event['away_team'], stats_db)
+                            prop_ledger.extend(p_targets)
+                
+                # 2. FETCH SPREADS/ML (ESPN)
+                gatekeeper = TitaniumGatekeeper(config, stats_db)
+                raw_espn = get_live_data("NBA")
+                spread_ledger = []
+                if raw_espn:
+                    for event in raw_espn['events']:
+                        bets = gatekeeper.audit_game(event, "NBA")
+                        spread_ledger.extend(bets)
+                
+                # 3. DISPLAY RESULTS
+                if prop_ledger:
+                    st.subheader("🔥 V34 LIVE PROP TARGETS (DraftKings)")
+                    st.dataframe(pd.DataFrame(prop_ledger))
+                else:
+                    st.info("No KOTC Props Found (Defenses Too Strong).")
                     
+                if spread_ledger:
+                    st.subheader("📊 V34 SPREAD/ML TARGETS")
+                    st.dataframe(pd.DataFrame(spread_ledger))
+                else:
+                    st.info("No Spread/ML Bets Survived Filters.")
+
+    # --- NHL / NCAAB EXECUTION ---
+    elif sport in ["NHL", "NCAAB"]:
+        if st.button("EXECUTE TITANIUM SEQUENCE"):
+            with st.spinner(f"AUDITING {sport} MARKETS..."):
+                raw_data = get_live_data(sport)
+                if raw_data:
+                    gatekeeper = TitaniumGatekeeper(config, None)
+                    ledger = []
                     for event in raw_data['events']:
                         bets = gatekeeper.audit_game(event, sport)
                         ledger.extend(bets)
