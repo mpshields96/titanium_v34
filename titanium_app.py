@@ -10,7 +10,7 @@ import pytz
 ODDS_API_KEY = "01dc7be6ca076e6b79ac4f54001d142d"
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="TITANIUM V34.11 STRICT", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="TITANIUM V34.12 OMEGA", layout="wide", page_icon="⚡")
 
 # --- CSS STYLING ---
 st.markdown("""
@@ -78,7 +78,7 @@ class OddsAPIEngine:
 
     # --- PARSERS ---
     def parse_nba_game(self, data, h_team, a_team, stats_db):
-        """NBA: Props + Spread/Total Logic."""
+        """NBA: Props + Spread/Total Logic (MAINTAINED)."""
         ledger = []
         bookmakers = data.get('bookmakers', [])
         if not bookmakers: return []
@@ -135,7 +135,7 @@ class OddsAPIEngine:
         return ledger
 
     def parse_ncaab_batch(self, games):
-        """NCAAB: STRICT CLOSERS ONLY (Top 10)."""
+        """NCAAB: DIVERSITY & VALUE (Spreads, ML, Totals)."""
         candidates = []
         for game in games:
             bookmakers = game.get('bookmakers', [])
@@ -147,26 +147,55 @@ class OddsAPIEngine:
             matchup = f"{a_team} @ {h_team}"
 
             for market in dk_book.get('markets', []):
+                
+                # 1. SPREADS (The Choke Zone)
                 if market['key'] == 'spreads':
                     for outcome in market['outcomes']:
                         team, line, price = outcome['name'], outcome['point'], outcome['price']
-                        
-                        # V34 LOGIC: STRICT "CLOSERS METRIC" ONLY
-                        # Must be a Small Favorite (-0.5 to -4.5) OR a Home Dog > +4
-                        # FILTER 1: The Choke Zone (-0.5 to -4.5)
+                        # CLOSERS METRIC (Section XXXIV): -0.5 to -4.5
                         if -4.5 <= line <= -0.5 and price > -180:
                             candidates.append({
                                 "Sport": "NCAAB", "Time": time_str, "Matchup": matchup, "Type": "Spread", 
                                 "Target": team, "Line": line, "Price": price, "Book": dk_book['title'],
-                                "Audit_Directive": "⚠️ CLOSERS METRIC: Small Fav. Audit FT%."
+                                "Audit_Directive": "⚠️ CLOSERS: Small Fav. Audit FT%."
+                            })
+                            
+                # 2. MONEYLINE (Value Dogs)
+                elif market['key'] == 'h2h':
+                    for outcome in market['outcomes']:
+                        team, price = outcome['name'], outcome['price']
+                        # VALUE DOG: +130 to +250
+                        if 130 <= price <= 250:
+                            candidates.append({
+                                "Sport": "NCAAB", "Time": time_str, "Matchup": matchup, "Type": "Moneyline", 
+                                "Target": team, "Line": "ML", "Price": price, "Book": dk_book['title'],
+                                "Audit_Directive": "🐶 UPSET WATCH: Verify Home/Away Splits."
+                            })
+                            
+                # 3. TOTALS (Extreme Pace)
+                elif market['key'] == 'totals':
+                    for outcome in market['outcomes']:
+                        side, line, price = outcome['name'], outcome['point'], outcome['price']
+                        # SHOOTOUT: > 155
+                        if side == "Over" and line > 155.0 and price > -115:
+                             candidates.append({
+                                "Sport": "NCAAB", "Time": time_str, "Matchup": matchup, "Type": "Total", 
+                                "Target": "Over", "Line": line, "Price": price, "Book": dk_book['title'],
+                                "Audit_Directive": "🔥 TRACK MEET: Confirm Pace stats."
+                            })
+                        # GRIND: < 120
+                        elif side == "Under" and line < 120.0 and price > -115:
+                             candidates.append({
+                                "Sport": "NCAAB", "Time": time_str, "Matchup": matchup, "Type": "Total", 
+                                "Target": "Under", "Line": line, "Price": price, "Book": dk_book['title'],
+                                "Audit_Directive": "🧊 SLUDGE FEST: Confirm Def efficiency."
                             })
                         
-        # HARD CAP: TOP 10 (To prevent "Too Many Lines")
-        # Sort by Time? Or just slice.
-        return candidates[:10]
+        # HARD CAP: TOP 12 (Diversity priority)
+        return candidates[:12]
 
     def parse_nhl_batch(self, games):
-        """NHL: EFFICIENCY GUILLOTINE (No Coin Flips)."""
+        """NHL: ML + TOTALS + GUILLOTINE."""
         raw_ledger = []
         
         for game in games:
@@ -175,57 +204,70 @@ class OddsAPIEngine:
             dk_book = next((b for b in bookmakers if b['key'] == 'draftkings'), bookmakers[0])
             
             h_team, a_team = game['home_team'], game['away_team']
-            # BAN
-            if "Penguins" in h_team or "Penguins" in a_team: continue 
+            if "Penguins" in h_team or "Penguins" in a_team: continue # BAN
 
             time_str = format_time(game['commence_time'])
             matchup = f"{a_team} @ {h_team}"
             game_id = game['id']
 
             ml_market = next((m for m in dk_book['markets'] if m['key'] == 'h2h'), None)
-            pl_market = next((m for m in dk_book['markets'] if m['key'] == 'spreads'), None) # PL
+            pl_market = next((m for m in dk_book['markets'] if m['key'] == 'spreads'), None) 
+            tot_market = next((m for m in dk_book['markets'] if m['key'] == 'totals'), None)
 
-            game_bets = []
-
+            # MONEYLINE / PUCK LINE
             if ml_market:
                 for outcome in ml_market['outcomes']:
                     team, price = outcome['name'], outcome['price']
-                    
-                    # LOGIC 1: PUCK LINE FORCE (Heavy Favs)
-                    if price < -200 and pl_market:
+                    # LOGIC 1: FORCE PL on Heavy Favs (Section XXX)
+                    if price < -200 and pl_market: 
                         pl_outcome = next((o for o in pl_market['outcomes'] if o['name'] == team), None)
                         if pl_outcome:
-                            game_bets.append({
+                            raw_ledger.append({
                                 "GameID": game_id, "Sport": "NHL", "Time": time_str, "Matchup": matchup, "Type": "Puck Line", 
                                 "Target": team, "Line": pl_outcome['point'], "Price": pl_outcome['price'], "Book": dk_book['title'],
-                                "Audit_Directive": "SAFETY VALVE: ML expensive. Confirm Goalie."
+                                "Audit_Directive": "SAFETY VALVE: ML expensive."
                             })
-                    
-                    # LOGIC 2: VALUE DOGS / STRICT FAVS
-                    # Only accept if price implies a decision, not a coin flip.
-                    # Acceptable: +130 or better (Value Dog).
-                    # Acceptable: -140 to -175 (Strong Fav, but not PL territory).
-                    # REJECT: -115 to +110 (Coin Flip).
-                    elif (price >= 130) or (-175 <= price <= -140):
-                        game_bets.append({
+                    # LOGIC 2: VALUE ML (Standard #3 Goalie Supremacy)
+                    elif (price >= 130) or (-175 <= price <= -140): 
+                        raw_ledger.append({
                             "GameID": game_id, "Sport": "NHL", "Time": time_str, "Matchup": matchup, "Type": "Moneyline", 
                             "Target": team, "Line": "ML", "Price": price, "Book": dk_book['title'],
-                            "Audit_Directive": "VALUE PLAY: Market Inefficiency Detected."
+                            "Audit_Directive": "VALUE ML: Verify Goalie."
                         })
             
-            raw_ledger.extend(game_bets)
+            # TOTALS (NEW)
+            if tot_market:
+                for outcome in tot_market['outcomes']:
+                    side, line, price = outcome['name'], outcome['point'], outcome['price']
+                    # ONLY BET IF PRICE IS GOOD (> -105)
+                    if price > -105:
+                        raw_ledger.append({
+                            "GameID": game_id, "Sport": "NHL", "Time": time_str, "Matchup": matchup, "Type": "Total", 
+                            "Target": f"{side} {line}", "Line": line, "Price": price, "Book": dk_book['title'],
+                            "Audit_Directive": "VALUE TOTAL: Market Inefficiency."
+                        })
 
-        # GUILLOTINE: If we have bets on BOTH sides of the same game, KILL BOTH.
-        # This solves the "Messy / Double Betting" issue.
+        # GUILLOTINE: Kill Conflicts (Messy Row Clean-up)
+        # If we have ML bets on BOTH sides of same game, delete BOTH.
         clean_ledger = []
-        game_ids = [b['GameID'] for b in raw_ledger]
-        from collections import Counter
-        counts = Counter(game_ids)
-        
+        game_bets = {}
         for bet in raw_ledger:
-            if counts[bet['GameID']] == 1:
-                # Remove internal ID before display
-                del bet['GameID']
+            gid = bet.get('GameID')
+            if gid not in game_bets: game_bets[gid] = []
+            game_bets[gid].append(bet)
+
+        for gid, bets in game_bets.items():
+            # Check for ML conflict
+            ml_bets = [b for b in bets if b['Type'] == 'Moneyline']
+            has_conflict = len(ml_bets) > 1 
+            
+            for bet in bets:
+                # If conflict exists and this is an ML bet, skip it (kill both sides).
+                if has_conflict and bet['Type'] == 'Moneyline':
+                    continue
+                
+                # Clean up dict
+                if 'GameID' in bet: del bet['GameID']
                 clean_ledger.append(bet)
         
         return clean_ledger
@@ -270,11 +312,11 @@ def fetch_nba_stats():
 
 # --- MAIN UI ---
 def main():
-    st.sidebar.title("TITANIUM V34.11 OMEGA")
+    st.sidebar.title("TITANIUM V34.12 OMEGA")
     sport = st.sidebar.selectbox("PROTOCOL SELECTION", ["NBA", "NCAAB", "NHL"])
     
     odds_engine = OddsAPIEngine(ODDS_API_KEY)
-    st.title(f"⚡ TITANIUM V34.11 | {sport}")
+    st.title(f"⚡ TITANIUM V34.12 | {sport}")
     
     if st.button(f"EXECUTE {sport} SEQUENCE"):
         with st.spinner(f"SCANNING {sport} MARKETS (DraftKings Live Data)..."):
